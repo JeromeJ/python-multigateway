@@ -1,5 +1,6 @@
 # Requires Py 3.4+
 
+import collections
 import configparser
 import contextlib
 import email
@@ -11,33 +12,25 @@ import socket
 import sys
 import requests
 
-conf = configparser.ConfigParser()
-conf.read('conf.INI')
+conf = {}
 
-_print = print
 
-if conf['APP']['LOGGING_FILE']:
-    print('Logging is enabled')
+class dotdict(dict):
+    """Allows accessing a dict like an object.
     
-    with contextlib.suppress(FileNotFoundError):
-        # Back it up if it exists
-        os.replace(conf['APP']['LOGGING_FILE'], conf['APP']['LOGGING_FILE'] + '.BCK')
-        
-        # Reset on start
-        os.remove(conf['APP']['LOGGING_FILE'])
+    Source: http://stackoverflow.com/a/23689767/
+    """
     
-    def print(*args, **kwargs):
-        with open(conf['APP']['LOGGING_FILE'], 'a') as f:
-            with contextlib.redirect_stdout(f):
-                _print(*args, **kwargs)
-else:
-    def print(*args, **kwargs):
-        """ Allows for printing in the Windows terminal without crashing. Very basic """
+    def __getattr__(self, attr):
+        # ConfigParser lowerize all params' name but not sections' name
         
         try:
-            _print(*args, **kwargs)
-        except UnicodeEncodeError:
-            _print('Can\'t print that!')
+            return self[attr]
+        except KeyError:
+            return self[attr.lower()]
+    
+    __setattr__ = dict.__setattr__
+    __delattr__ = dict.__delattr__
 
 
 def parse_headers(raw_headers):
@@ -45,11 +38,72 @@ def parse_headers(raw_headers):
     return dict(email.message_from_file(io.StringIO(raw_headers)).items())
 
 
+def init_rc_hook(host=None, port=None):
+    if host is None:
+        host = conf.RC.HOST
+    
+    if port is None:
+        port = conf.RC.PORT
+
+    rc_hook = socket.socket()
+    rc_hook.setblocking(0)
+    
+    # Allows quicker reuse of the address after the server is being resetted
+    rc_hook.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    rc_hook.bind((host, int(port)))
+    
+    rc_hook.listen(-1)
+    
+    return rc_hook
+
+
+def init_irc_conn(**kwargs):
+    # Get the params from kwargs
+    # Then from conf.IRC if absent in kwargs
+    c = dotdict(
+        collections.ChainMap(
+            kwargs,
+            conf.IRC
+        )
+    )
+
+    irc = socket.socket()
+
+    irc.connect((c.host, int(c.port)))
+
+    # /!\ setblocking AFTER connect:
+    #   connect rely on a DNS server that can't always be non blocking
+    #   thus raising an exception.
+    irc.setblocking(0)
+
+    if c.password:
+        sendcmd(irc, 'PASS {}'.format(c.password))
+
+    sendcmd(irc, 'NICK {}'.format(c.bot_name))
+    sendcmd(irc, 'USER {} {} bla :{}'.format(
+        c.I,
+        c.HOST,
+        c.DESCRIPT
+    ))
+    sendcmd(irc, 'JOIN {}'.format(c.ROOM))
+
+    if c.welcome_msg:
+        sendcmd(irc, 'PRIVMSG {} :{}'.format(
+            c.ROOM, c.welcome_msg
+        ))
+
+    return irc
+
+
 def sendcmd(s, msg):
     s.sendall((msg+'\r\n').encode('utf-8'))
 
 
-def sendmsg(s, msg, to=conf['IRC']['ROOM']):
+def sendmsg(s, msg, to=None):
+    if to is None:
+        to = conf.IRC.ROOM
+    
     sendcmd(s, 'PRIVMSG {} :{}'.format(to, msg))
 
     
@@ -58,6 +112,9 @@ def recv_data(s):
 
 
 def http_recv_all(s):
+    # Reinvented the wheel :)
+    # To be able to work with non-blocking sockets and select module.
+    
     r = ''
     headers = {}
     
@@ -75,18 +132,28 @@ def http_recv_all(s):
     
     body = r.split('\r\n\r\n', 1)[1]
     
+    # Still not complete? Get moar and retry!
     while len(body.encode('utf-8')) < int(headers['content-length'])-1:
         r += recv_data(s)
         
         body = r.split('\r\n\r\n', 1)[1]
     
+    # Properly close the connection or RC will keep spamming until we do.
     s.sendall(b'HTTP/1.0 200 OK\r\n\r\n')
     s.close()
     
-    return {'headers': headers, 'body': body}
+    return (headers, body)
 
 
-def handle_irc(irc, readbuffer):
+def handle_irc(irc, readbuffer, room=None, rc=None):
+    if room is None:
+        room = conf.IRC.ROOM
+    
+    if rc is None:
+        rc = {}
+    
+    rc = dotdict(collections.ChainMap(rc, conf.RC))
+
     new = recv_data(irc)
     
     if new:
@@ -116,7 +183,7 @@ def handle_irc(irc, readbuffer):
             sendcmd(irc, 'PONG {}'.format(cmd[1]))
             
             print('PONG!')
-        elif cmd[1] == 'PRIVMSG' and cmd[2] == conf['IRC']['ROOM']:
+        elif cmd[1] == 'PRIVMSG' and cmd[2] == room:
             # Ex: :username!idthing PRIVMSG #roomName :My message
             
             # DEV note: Should I use REGEX instead?
@@ -126,10 +193,10 @@ def handle_irc(irc, readbuffer):
             print('{sender}: {msg}'.format(sender=sender, msg=msg))
             
             r = requests.post(
-                conf['RC']['HOOK_ADDR'],
+                rc.HOOK_ADDR,
                 json={
-                    "icon_url": conf['RC']['AVATAR_URL'].format(sender=sender),
-                    "text": conf['TEMPLATES']['RC_msg'].format(
+                    "icon_url": rc.AVATAR_URL.format(sender=sender),
+                    "text": rc.msgtemplate.format(
                         sender=sender,
                         msg=msg
                     ),
@@ -139,35 +206,48 @@ def handle_irc(irc, readbuffer):
     return readbuffer
 
 
-def handle_rc_hook(rc_hook):
+def handle_rc_hook(rc_hook, rc_hook_addr=None, msgtemplate=None, bot_name=None, admin_username=None):
+    if rc_hook_addr is None:
+        rc_hook_addr = conf.RC.HOOK_ADDR
+    
+    if msgtemplate is None:
+        msgtemplate = conf.IRC.msgtemplate
+    
+    if bot_name is None:
+        bot_name = conf.IRC.BOT_NAME
+    
+    if admin_username is None:
+        admin_username = conf.APP.admin_username
+
     c, _ = rc_hook.accept()
     
     headers, body = http_recv_all(c)
     
     try:
         data = json.loads(body)
+        print(data)
     except ValueError:
         print('INVALID JSON ({}): {} {}'.format(len(body), headers, body))
         
         sendmsg(irc, '@{}: Invalid JSON! Go check the logs!'.format(
-            conf['APP']['admin_username']
+            admin_username
         ))
         
         requests.post(
-            conf['RC']['HOOK_ADDR'],
+            rc_hook_addr,
             json={
                 "text": '@{}: Invalid JSON! Go check the logs!'.format(
-                    conf['APP']['admin_username']
+                    admin_username
                 ),
             }
         )
-    
-    print(data)
+        
+        return
     
     # Not our bot nor any others'
     # PREVENT infinite backfeed loop
-    if data['user_name'] != conf['IRC']['BOT_NAME'] and not data['bot']:
-        msg = conf['TEMPLATES']['IRC_msg'].format(
+    if data['user_name'] != bot_name and not data['bot']:
+        msg = msgtemplate.format(
             sender=data['user_name'],
             msg=data['text']
         )
@@ -176,65 +256,61 @@ def handle_rc_hook(rc_hook):
         
         sendmsg(irc, msg)
 
-try:
-    rc_hook = socket.socket()
-    rc_hook.setblocking(0)
-    
-    # Allows quicker reuse of the address after the server is being resetted
-    rc_hook.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    rc_hook.bind((
-        conf['RC']['HOST'],
-        int(conf['RC']['PORT'])
-    ))
-    
-    rc_hook.listen(-1)
-    
-    irc = socket.socket()
-    
-    irc.connect((
-        conf['IRC']['HOST'],
-        int(conf['IRC']['PORT'])
-    ))
-    
-    # /!\ setblocking AFTER connect:
-    #   connect rely on a DNS server that can't always be non blocking
-    #   thus raising an exception.
-    irc.setblocking(0)
-    
-    if conf['IRC']['PASSWORD']:
-        sendcmd(irc, 'PASS {}'.format(conf['IRC']['PASSWORD']))
-    
-    sendcmd(irc, 'NICK {}'.format(conf['IRC']['BOT_NAME']))
-    sendcmd(irc, 'USER {} {} bla :{}'.format(
-        conf['IRC']['I'],
-        conf['IRC']['HOST'],
-        conf['IRC']['DESCRIPT']
-    ))
-    sendcmd(irc, 'JOIN {}'.format(conf['IRC']['ROOM']))
-    
-    if conf['IRC']['welcome_msg']:
-        sendcmd(irc, 'PRIVMSG {} :{}'.format(
-            conf['IRC']['ROOM'], conf['IRC']['welcome_msg']
-        ))
-    
-    readbuffer = ''
-    
-    while 42:
-        rdy2read_sockets, __, __ = select.select([irc, rc_hook], (), ())
-        
-        for read_s in rdy2read_sockets:
-            if read_s is irc:
-                readbuffer = handle_irc(irc, readbuffer)
-            else:
-                handle_rc_hook(rc_hook)
 
-except KeyboardInterrupt:
-    # sendmsg(irc, 'Bye bye~')
-    pass
-finally:
+if __name__ == '__main__':
+    conf = configparser.ConfigParser()
+    conf.read('conf.INI')
+    
+    import collections
+    
+    conf = dotdict({
+        key: dotdict(val) for key, val in conf.items()
+    })
+    
+    _print = print
+
+    if conf.APP.LOGGING_FILE:
+        print('Logging is enabled')
+        
+        with contextlib.suppress(FileNotFoundError):
+            # Back it up if it exists
+            os.replace(conf.APP.LOGGING_FILE, conf.APP.LOGGING_FILE + '.BCK')
+            
+            # Reset on start
+            os.remove(conf.APP.LOGGING_FILE)
+        
+        def print(*args, **kwargs):
+            with open(conf.APP.LOGGING_FILE, 'a') as f:
+                with contextlib.redirect_stdout(f):
+                    _print(*args, **kwargs)
+    else:
+        def print(*args, **kwargs):
+            """Allows for printing in the Windows terminal without crashing."""
+            
+            try:
+                _print(*args, **kwargs)
+            except UnicodeEncodeError:
+                _print('Can\'t print that!')
+    
+    with contextlib.suppress(KeyboardInterrupt):
+        rc_hook = init_rc_hook()
+        irc = init_irc_conn()
+        
+        readbuffer = ''
+        
+        while 42:
+            rdy2read_sockets, __, __ = select.select([irc, rc_hook], (), ())
+            
+            for read_s in rdy2read_sockets:
+                if read_s is irc:
+                    # Incoming IRC commands
+                    readbuffer = handle_irc(irc, readbuffer)
+                else:
+                    # Incoming http POST request
+                    handle_rc_hook(rc_hook)
+
     with contextlib.suppress(NameError):
-        s.close()
+        irc.close()
     
     with contextlib.suppress(NameError):
         rc_hook.close()

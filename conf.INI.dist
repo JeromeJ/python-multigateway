@@ -4,21 +4,19 @@ LOGGING_FILE =irc-rc-gateway.log
 # Notices the admin on the chat that some errors occured on the server
 admin_username=
 
-[TEMPLATES]
-RC_msg=*{sender}:* {msg}
-IRC_msg=<RC:{sender}> {msg}
-
 [RC]
 HOST=
 PORT=
 HOOK_ADDR=
 AVATAR_URL=
+msgtemplate==*{sender}:* {msg}
 
 [IRC]
 HOST=
 PORT=
 ROOM=#example
 BOT_NAME=
+msgtemplate=<RC:{sender}> {msg}
 
 # Can be empty
 PASSWORD=
