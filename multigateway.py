@@ -38,6 +38,17 @@ def parse_headers(raw_headers):
     return dict(email.message_from_file(io.StringIO(raw_headers)).items())
 
 
+def load_config(filename):
+    conf = configparser.ConfigParser()
+    conf.read(filename)
+    
+    conf = dotdict({
+        key: dotdict(val) for key, val in conf.items()
+    })
+    
+    return conf
+
+
 def init_rc_hook(host=None, port=None):
     if host is None:
         host = conf.RC.HOST
@@ -258,14 +269,7 @@ def handle_rc_hook(rc_hook, rc_hook_addr=None, msgtemplate=None, bot_name=None, 
 
 
 if __name__ == '__main__':
-    conf = configparser.ConfigParser()
-    conf.read('conf.INI')
-    
-    import collections
-    
-    conf = dotdict({
-        key: dotdict(val) for key, val in conf.items()
-    })
+    conf = load_config('conf.INI')
     
     _print = print
 
@@ -279,6 +283,8 @@ if __name__ == '__main__':
             # Reset on start
             os.remove(conf.APP.LOGGING_FILE)
         
+        # Dev NOTE: Should probably wrap around while 42 instead of
+        #   around each print call
         def print(*args, **kwargs):
             with open(conf.APP.LOGGING_FILE, 'a') as f:
                 with contextlib.redirect_stdout(f):
