@@ -12,6 +12,16 @@ import socket
 import sys
 import requests
 
+# readers = {
+    # 'irc': irc_read,
+    # 'rc': rc_read,
+# }
+
+# writers = {
+    # 'irc': irc_write,
+    # 'rc': rc_write,
+# }
+
 conf = {}
 
 
@@ -33,7 +43,8 @@ class dotdict(dict):
     __delattr__ = dict.__delattr__
 
 
-def parse_headers(raw_headers):
+def parse_headers(raw_headers:str) -> dict:
+    """Parses HTTP headers."""
     # Source: http://stackoverflow.com/a/40481308/
     return dict(email.message_from_file(io.StringIO(raw_headers)).items())
 
@@ -269,6 +280,13 @@ def handle_rc_hook(rc_hook, rc_hook_addr=None, msgtemplate=None, bot_name=None, 
 
 
 if __name__ == '__main__':
+    # If you don't load a config then most functions requires to be given each 
+    #   individual parameter they may need in order to function.
+    # 
+    # Everytime you provide a parameter already given by the config, it will be
+    #   selected over the config param. Meaning you can overwrite default
+    #   behaviour on each function call
+    #
     conf = load_config('conf.INI')
     
     _print = print

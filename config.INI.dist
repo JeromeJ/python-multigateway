@@ -1,6 +1,6 @@
 [APP]
 # Leave empty to disable logging
-LOGGING_FILE =irc-rc-gateway.log
+LOGGING_FILE=multigateway.log
 # Notices the admin on the chat that some errors occured on the server
 admin_username=
 
