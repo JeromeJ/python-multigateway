@@ -287,7 +287,7 @@ if __name__ == '__main__':
     #   selected over the config param. Meaning you can overwrite default
     #   behaviour on each function call
     #
-    conf = load_config('conf.INI')
+    conf = load_config('config.INI')
     
     _print = print
 
